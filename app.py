@@ -42,9 +42,9 @@ class State(TypedDict, total=False):
 DB_PATH = "contacts.db"
 os.makedirs(os.path.dirname(DB_PATH) or ".", exist_ok=True)
 
-# 既存のDBファイルを削除（リセット）
-if os.path.exists(DB_PATH):
-    os.remove(DB_PATH)
+# 既存DBファイルを削除する代わりに、なければ作成するだけにする
+# if os.path.exists(DB_PATH):
+#     os.remove(DB_PATH)
 
 with sqlite3.connect(DB_PATH) as con:
     con.execute("""
@@ -253,13 +253,37 @@ graph = sg.compile()
 st.set_page_config(page_title="名刺 OCR Demo", page_icon="📇")
 st.title("📇 Business-Card OCR Demo")
 
-# ファイルアップローダーにキーを追加し、セッションで管理できるようにする
-files = st.file_uploader(
-    "名刺画像を選択（複数枚可）",
-    type=["png", "jpg", "jpeg", "webp"],
-    accept_multiple_files=True,
-    key="card_files"
-)
+# 入力方法の選択（タブで切り替え）
+tab1, tab2 = st.tabs(["📁 ファイルアップロード", "📷 カメラで撮影"])
+
+with tab1:
+    # ファイルアップローダーにキーを追加し、セッションで管理できるようにする
+    files = st.file_uploader(
+        "名刺画像を選択（複数枚可）",
+        type=["png", "jpg", "jpeg", "webp"],
+        accept_multiple_files=True,
+        key="card_files"
+    )
+
+with tab2:
+    # カメラ入力
+    camera_img = st.camera_input("カメラで名刺を撮影", key="camera_image")
+    
+    # カメラで撮影した画像がある場合、それをfilesとして扱う
+    if camera_img is not None:
+        if "files_from_camera" not in st.session_state:
+            st.session_state.files_from_camera = [camera_img]
+        elif camera_img not in st.session_state.files_from_camera:
+            st.session_state.files_from_camera.append(camera_img)
+        
+        # 撮影した画像の一覧を表示
+        if len(st.session_state.files_from_camera) > 0:
+            st.write(f"撮影済み: {len(st.session_state.files_from_camera)}枚")
+            
+            # 画像をクリアするボタン
+            if st.button("撮影画像をクリア"):
+                st.session_state.files_from_camera = []
+                st.rerun()
 
 # session_state 保持
 if "dup_cards" not in st.session_state: st.session_state.dup_cards = None
@@ -276,12 +300,29 @@ if st.session_state.clear_files_flag:
 def should_clear_files():
     # ファイルクリアフラグをセット
     st.session_state["clear_files_flag"] = True
+    # カメラで撮影した写真もクリア
+    if "files_from_camera" in st.session_state:
+        st.session_state.files_from_camera = []
     # 再実行
-    st.experimental_rerun()
+    st.rerun()
 
 # --- 解析開始ボタン ----------------------------------------------------------
-if st.button("🖨️ 解析開始") and files:
-    cards = ocr_many(files)
+# アップロードファイルまたはカメラ画像がある場合にボタンを有効化
+has_files = files is not None and len(files) > 0
+has_camera_images = "files_from_camera" in st.session_state and len(st.session_state.files_from_camera) > 0
+
+# 入力ファイルの取得と表示
+all_files = []
+if has_files:
+    all_files.extend(files)
+if has_camera_images:
+    all_files.extend(st.session_state.files_from_camera)
+
+if st.button("🔊 解析開始", disabled=(not has_files and not has_camera_images)) and all_files:
+    st.info(f"📝 合計 {len(all_files)} 枚の画像を処理中...")
+    
+    # ファイルをOCR処理
+    cards = ocr_many(all_files)
     
     # 初期状態を定義
     initial_state = {"cards": cards}
@@ -358,5 +399,52 @@ if rows:
         "会社URL", "会社電話", "会社FAX"
     ])
     
-    # データフレームを表として表示
-    st.table(df)
+    # 検索機能のためのフィルターボックス
+    st.text_input("🔍 検索", key="search_term", placeholder="検索語句を入力...")
+    search_term = st.session_state.get("search_term", "").lower()
+    
+    # 検索条件に一致する行をフィルタリング
+    if search_term:
+        mask = False
+        for col in df.columns:
+            # 各列で検索語句を含む行を探す (NaN値は文字列に変換)
+            mask = mask | df[col].astype(str).str.lower().str.contains(search_term, na=False)
+        filtered_df = df[mask]
+    else:
+        filtered_df = df
+    
+    # カスタム CSS で横スクロールを有効化し、最小幅を設定
+    st.markdown("""
+    <style>
+    .data-table-container {
+        min-width: 1200px;  /* 最小幅の設定 */
+        overflow-x: auto;   /* 横スクロールを有効化 */
+    }
+    </style>
+    """, unsafe_allow_html=True)
+    
+    # データフレームを表示 (検索可能、横スクロール対応)
+    with st.container():
+        st.markdown('<div class="data-table-container">', unsafe_allow_html=True)
+        st.dataframe(
+            filtered_df,
+            use_container_width=True,
+            column_config={
+                "氏名": st.column_config.TextColumn("氏名", width="medium"),
+                "会社名": st.column_config.TextColumn("会社名", width="medium"),
+                "メールアドレス": st.column_config.TextColumn("メールアドレス", width="medium"),
+                "個人電話": st.column_config.TextColumn("個人電話", width="medium"),
+                "部署名": st.column_config.TextColumn("部署名", width="medium"),
+                "役職": st.column_config.TextColumn("役職", width="medium"),
+                "肩書き": st.column_config.TextColumn("肩書き", width="medium"),
+                "会社住所": st.column_config.TextColumn("会社住所", width="large"),
+                "会社URL": st.column_config.LinkColumn("会社URL", width="medium"),
+                "会社電話": st.column_config.TextColumn("会社電話", width="medium"),
+                "会社FAX": st.column_config.TextColumn("会社FAX", width="medium")
+            },
+            height=400
+        )
+        st.markdown('</div>', unsafe_allow_html=True)
+    
+    # 統計情報
+    st.caption(f"全 {len(df)} 件中 {len(filtered_df)} 件表示中")
